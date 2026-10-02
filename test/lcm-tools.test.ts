@@ -91,6 +91,9 @@ function buildLcmEngine(params: {
   conversationId?: number;
   conversationIdBySessionKey?: number;
   conversationFamilyIds?: number[];
+  resolveSessionKeyAlias?: (
+    sessionKey: string,
+  ) => Promise<{ sessionKey: string; conversationId: number } | { error: string } | null>;
   timezone?: string;
 }) {
   return {
@@ -123,6 +126,9 @@ function buildLcmEngine(params: {
               updatedAt: new Date("2026-01-01T00:00:00.000Z"),
             },
       ),
+      resolveSessionKeyAlias: params.resolveSessionKeyAlias
+        ? vi.fn(params.resolveSessionKeyAlias)
+        : undefined,
       getConversationFamilyIds: vi.fn(async () => {
         if (params.conversationFamilyIds && params.conversationFamilyIds.length > 0) {
           return params.conversationFamilyIds;
@@ -584,6 +590,84 @@ describe("LCM tools session scoping", () => {
     );
     const text = (result.content[0] as { text: string }).text;
     expect(text).toContain("session family rooted at 3556");
+  });
+
+  it("lcm_grep resolves explicit short sessionKey suffixes to canonical LCM session keys", async () => {
+    const retrieval = {
+      grep: vi.fn(async () => ({
+        messages: [],
+        summaries: [],
+        totalMatches: 0,
+      })),
+      expand: vi.fn(),
+      describe: vi.fn(),
+    };
+
+    const tool = createLcmGrepTool({
+      deps: makeDeps(),
+      lcm: buildLcmEngine({
+        retrieval,
+        conversationIdBySessionKey: 3593,
+        conversationFamilyIds: [3593, 3548],
+        resolveSessionKeyAlias: vi.fn(async (sessionKey: string) =>
+          sessionKey === "channel:1511742500816294049"
+            ? {
+                sessionKey: "agent:k3rnel:discord:channel:1511742500816294049",
+                conversationId: 3593,
+              }
+            : null,
+        ),
+      }) as never,
+      sessionKey: "agent:main:current-channel-session",
+    });
+    const result = await tool.execute("call-short-session-key", {
+      pattern: '"Inbox + Important + Unread"',
+      mode: "full_text",
+      sessionKey: "channel:1511742500816294049",
+    });
+
+    expect(retrieval.grep).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: 3593,
+        conversationIds: [3593, 3548],
+      }),
+    );
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("session family rooted at 3593");
+  });
+
+  it("lcm_grep fails closed for ambiguous short sessionKey suffixes", async () => {
+    const retrieval = {
+      grep: vi.fn(async () => ({
+        messages: [],
+        summaries: [],
+        totalMatches: 0,
+      })),
+      expand: vi.fn(),
+      describe: vi.fn(),
+    };
+
+    const tool = createLcmGrepTool({
+      deps: makeDeps(),
+      lcm: buildLcmEngine({
+        retrieval,
+        resolveSessionKeyAlias: vi.fn(async () => ({
+          error:
+            'Multiple LCM conversations match sessionKey suffix "channel:shared" (agent:a:discord:channel:shared, agent:b:discord:channel:shared). Use the full sessionKey.',
+        })),
+      }) as never,
+      sessionKey: "agent:main:current-channel-session",
+    });
+    const result = await tool.execute("call-ambiguous-short-session-key", {
+      pattern: "deployment",
+      sessionKey: "channel:shared",
+    });
+
+    expect(retrieval.grep).not.toHaveBeenCalled();
+    expect((result.details as { error?: string }).error).toContain(
+      "Multiple LCM conversations match sessionKey suffix",
+    );
+    expect((result.details as { error?: string }).error).toContain("Use the full sessionKey");
   });
 
   it("lcm_grep rejects Discord snowflakes passed as conversationId before searching", async () => {

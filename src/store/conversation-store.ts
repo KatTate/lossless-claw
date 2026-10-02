@@ -126,6 +126,11 @@ export type ConversationRecord = {
   updatedAt: Date;
 };
 
+export type ConversationSessionKeyAliasResolution =
+  | { sessionKey: string; conversationId: ConversationId }
+  | { error: string }
+  | null;
+
 export type MessageSearchInput = {
   conversationId?: ConversationId;
   conversationIds?: ConversationId[];
@@ -441,6 +446,59 @@ export class ConversationStore {
       .get(sessionKey) as unknown as ConversationRow | undefined;
 
     return row ? toConversationRecord(row) : null;
+  }
+
+  async resolveSessionKeyAlias(sessionKey: string): Promise<ConversationSessionKeyAliasResolution> {
+    const normalizedSessionKey = sessionKey.trim();
+    if (!normalizedSessionKey) {
+      return null;
+    }
+
+    const exact = await this.getConversationBySessionKey(normalizedSessionKey);
+    if (exact?.sessionKey) {
+      return { sessionKey: exact.sessionKey, conversationId: exact.conversationId };
+    }
+
+    if (normalizedSessionKey.startsWith("agent:")) {
+      return null;
+    }
+
+    const escapedSuffix = normalizedSessionKey.replace(/[\\%_]/g, (match) => `\\${match}`);
+    const rows = this.db
+      .prepare(
+        `SELECT session_key, conversation_id
+         FROM conversations
+         WHERE active = 1
+           AND session_key IS NOT NULL
+           AND session_key LIKE ? ESCAPE '\\'
+         ORDER BY updated_at DESC, conversation_id DESC`,
+      )
+      .all(`%:${escapedSuffix}`) as Array<{
+      session_key: string | null;
+      conversation_id: number;
+    }>;
+
+    const matches = new Map<string, ConversationId>();
+    for (const row of rows) {
+      const candidate = row.session_key?.trim();
+      if (candidate) {
+        matches.set(candidate, row.conversation_id);
+      }
+    }
+
+    if (matches.size === 0) {
+      return null;
+    }
+
+    if (matches.size > 1) {
+      const keys = Array.from(matches.keys()).join(", ");
+      return {
+        error: `Multiple LCM conversations match sessionKey suffix "${normalizedSessionKey}" (${keys}). Use the full sessionKey.`,
+      };
+    }
+
+    const [[resolvedSessionKey, conversationId]] = Array.from(matches.entries());
+    return { sessionKey: resolvedSessionKey, conversationId };
   }
 
   async getConversationFamilyIds(input: {

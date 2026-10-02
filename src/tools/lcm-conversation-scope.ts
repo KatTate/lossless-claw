@@ -19,6 +19,9 @@ type ConversationScopeStore = ReturnType<LcmContextEngine["getConversationStore"
     sessionKey?: string;
   }) => Promise<{ conversationId: number } | null>;
   getConversationBySessionKey?: (sessionKey: string) => Promise<{ conversationId: number } | null>;
+  resolveSessionKeyAlias?: (
+    sessionKey: string,
+  ) => Promise<{ sessionKey: string; conversationId: number } | { error: string } | null>;
   getConversationFamilyIds?: (input: {
     conversationId?: number;
     sessionId?: string;
@@ -174,7 +177,23 @@ export async function resolveLcmConversationScope(input: {
     && input.deps?.isSubagentSessionKey(normalizedInputSessionId)
       ? normalizedInputSessionId
       : undefined;
-  const normalizedSessionKey = explicitSessionKey || sessionIdAsSessionKey;
+  let normalizedSessionKey = explicitSessionKey || sessionIdAsSessionKey;
+  if (normalizedSessionKey) {
+    const store = lcm.getConversationStore() as ConversationScopeStore;
+    if (typeof store.resolveSessionKeyAlias === "function") {
+      const resolvedSessionKey = await store.resolveSessionKeyAlias(normalizedSessionKey);
+      if (resolvedSessionKey && "error" in resolvedSessionKey) {
+        return {
+          allConversations: false,
+          delegated: false,
+          error: resolvedSessionKey.error,
+        };
+      }
+      if (resolvedSessionKey) {
+        normalizedSessionKey = resolvedSessionKey.sessionKey;
+      }
+    }
+  }
   const isDelegatedSession =
     Boolean(normalizedSessionKey) && Boolean(input.deps?.isSubagentSessionKey(normalizedSessionKey!));
   const isolateCurrentSessionFamily = isIsolatedCronSessionKey(normalizedSessionKey);
